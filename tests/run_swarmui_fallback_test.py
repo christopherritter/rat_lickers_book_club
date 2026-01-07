@@ -32,7 +32,7 @@ if not sid:
 prompt = "photorealistic book shelfie photograph, book prominently displayed showing title: 'Live Fallback Test'"
 negative = "blurry, low quality"
 
-loras_as_strings = [f"{l['name']}:{l['weight']}" for l in rlbc.LEGION_LORAS if l.get('name')]
+loras_as_strings = [f"{name}:{rlbc.LEGION_LORA_WEIGHTS.get(name, 1.0)}" for name in rlbc.LEGION_LORAS]
 
 fallback_full = {
     "session_id": sid,

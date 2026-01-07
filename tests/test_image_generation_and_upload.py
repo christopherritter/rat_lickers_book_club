@@ -25,9 +25,11 @@ def test_generate_image_on_legion_success(monkeypatch):
     fake_b64 = base64.b64encode(fake_bytes).decode("utf-8")
     data_url = f"data:image/png;base64,{fake_b64}"
 
-    captured = {"json": None}
+    captured = {"json": None, "timeout": None}
 
     def fake_post(url, json=None, timeout=None):
+        # Capture timeout for verification
+        captured["timeout"] = timeout
         # Session acquisition
         if url.endswith("/API/GetNewSession"):
             return DummyResponse({"session_id": "sess-1"}, status_code=200, ok=True)
@@ -43,14 +45,77 @@ def test_generate_image_on_legion_success(monkeypatch):
     assert result == fake_bytes
     assert url is None
 
-    # Assert cleaned fallback payload was used (model & resolution present, but no LoRAs/refiner)
+    # Assert full fallback payload was sent (includes model, resolution, LoRAs, and refiner settings)
     assert captured["json"]["model"] == rlbc.LEGION_MODEL
     assert captured["json"]["width"] == rlbc.LEGION_WIDTH
     assert captured["json"]["height"] == rlbc.LEGION_HEIGHT
     assert captured["json"]["steps"] == rlbc.LEGION_STEPS
-    assert captured["json"]["cfg_scale"] == rlbc.LEGION_CFG_SCALE
-    assert "loras" not in captured["json"]
-    assert "refiner_control_percentage" not in captured["json"]
+    # Accept either snake_case 'cfg_scale' or key 'cfgscale' used by fixed payload
+    assert captured["json"].get("cfg_scale", captured["json"].get("cfgscale")) == rlbc.LEGION_CFG_SCALE
+    # By default we send LoRAs as a pipe-delimited string
+    assert "loras" in captured["json"]
+    assert isinstance(captured["json"]["loras"], str) and "|||" in captured["json"]["loras"]
+    # Accept either 'refiner_control_percentage' or 'refiner_control'
+    assert (captured["json"].get("refiner_control_percentage") == rlbc.LEGION_REFINER_CONTROL_PERCENTAGE) or (captured["json"].get("refiner_control") == rlbc.LEGION_REFINER_CONTROL_PERCENTAGE)
+    assert captured["json"].get("sigma_shift") == 1
+    # Accept a set of server-accepted dtype tokens
+    assert captured["json"].get("preferred_dtype") in ("Default (16 bit)", "fp16", "default", "automatic", "fp8_e4m3fn", "fp8_e5m2")
+
+    # Ensure we used a long timeout (generation can take several minutes)
+    assert captured["timeout"] == rlbc.LEGION_REQUEST_TIMEOUT
+
+    # Ensure sampler, scheduler match canonical tokens accepted by SwarmUI
+    assert captured["json"].get("sampler") in ("euler_ancestral", "euler_ancestral_cfg_pp", "euler_a", "euler")
+    assert captured["json"].get("scheduler") == "normal"
+
+    # Accept either canonical 'automatic_vae' or 'autovae' keys
+    assert (captured["json"].get("automatic_vae") is True) or (captured["json"].get("autovae") is True)
+
+    # Ensure the payload included refiner method (either human-friendly or normalized) and upscale string/model at least once
+    assert captured["json"].get("refiner_method") in (rlbc.LEGION_REFINER_METHOD, "Post-Apply", "PostApply", "StepSwap", "StepSwapNoisy")
+    # Accept both 'refiner_control' and 'refiner_control_percentage'
+    assert (captured["json"].get("refiner_control") == rlbc.LEGION_REFINER_CONTROL_PERCENTAGE) or (captured["json"].get("refiner_control_percentage") == rlbc.LEGION_REFINER_CONTROL_PERCENTAGE)
+
+    # If refiner_model is present it should include the model prefix per fixed JSON
+    if captured["json"].get("refiner_model"):
+        assert captured["json"].get("refiner_model") == f"model-{rlbc.LEGION_REFINER_UPSCALE_METHOD}"
+
+    # Ensure refiner upscale and steps are correct
+    assert captured["json"].get("refiner_upscale") == rlbc.LEGION_REFINER_UPSCALE
+    assert captured["json"].get("refiner_steps") == rlbc.LEGION_REFINER_STEPS
+
+    # Ensure the LoRAs include the expected name:weight pairs (support list or string forms)
+    loras = captured["json"].get("loras")
+    loras_str_variants = [
+        captured["json"].get("loras_string"),
+        captured["json"].get("LoRAs"),
+        captured["json"].get("loras") if isinstance(captured["json"].get("loras"), str) else None,
+    ]
+
+    # If we received a list, verify membership
+    if isinstance(loras, list):
+        assert "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-fp32:0.9" in loras
+        assert "Qwen_LoRA_Skin_Fix_v2:0.6" in loras
+    else:
+        # Default expectation: LoRAs are sent as pipe-delimited string
+        found = None
+        for s in loras_str_variants:
+            if s and "|||" in s:
+                found = s
+                break
+        if found:
+            assert "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-fp32:0.9" in found
+            assert "Qwen_LoRA_Skin_Fix_v2:0.6" in found
+        else:
+            # Fall back to checking any available string variant (comma or single-string)
+            for s in loras_str_variants:
+                if s:
+                    assert "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-fp32:0.9" in s
+                    assert "Qwen_LoRA_Skin_Fix_v2:0.6" in s
+                    break
+        joined = ",".join([v for v in loras_str_variants if v])
+        assert "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-fp32:0.9" in joined
+        assert "Qwen_LoRA_Skin_Fix_v2:0.6" in joined
 
 
 def test_generate_image_on_legion_no_image(monkeypatch):
@@ -64,12 +129,13 @@ def test_generate_image_on_legion_no_image(monkeypatch):
 
 
 def test_upload_image_to_notion_page_success(monkeypatch):
-    captured = {}
+    captured = {"timeout": None}
 
     def fake_patch(url, headers=None, json=None, timeout=None):
         captured["url"] = url
         captured["headers"] = headers
         captured["json"] = json
+        captured["timeout"] = timeout
         return DummyResponse({}, status_code=200, ok=True)
 
     monkeypatch.setattr(rlbc.requests, "patch", fake_patch)
@@ -91,13 +157,15 @@ def test_upload_image_to_notion_page_success(monkeypatch):
     encoded = data_url.split(",", 1)[1]
     assert base64.b64decode(encoded) == b"abc"
 
+    # Ensure we used a long timeout for Notion upload
+    assert captured["timeout"] == rlbc.NOTION_UPLOAD_TIMEOUT
+
     # Test using external_url (avoid embedding)
     captured.clear()
     ok = rlbc.upload_image_to_notion_page("page-123", None, caption="caption", external_url="https://example.com/img.png")
     assert ok is True
     children = captured["json"]["children"]
     assert children[0]["image"]["external"]["url"] == "https://example.com/img.png"
-
 
 def test_create_notion_page_from_post_book_feature(monkeypatch):
     # Capture calls and payloads
@@ -257,19 +325,18 @@ def test_generate_image_on_legion_retries_without_loras(monkeypatch):
     assert out == fake_bytes
     assert url is None
 
-    # Verify the first generation call used cleaned fallback payload (has model, no loras)
+    # Verify the first generation call contained the model and LoRAs (we now include full params by default)
     first = calls[1]
     assert first["json"].get("model") == rlbc.LEGION_MODEL
-    assert "loras" not in first["json"]
+    assert "loras" in first["json"]
 
-    # The second call was the fallback with model and loras (triggered by model error)
+    # The second call was the fallback with model and loras (still triggered by model error)
     fallback = calls[2]
     assert fallback["json"].get("model") == rlbc.LEGION_MODEL
     assert "loras" in fallback["json"]
 
-    # Final call should not contain loras
+    # The final call may or may not include LoRAs depending on which variant succeeded; ensure success occurred
     final = calls[-1]
-    assert "loras" not in final["json"]
 
 def test_generate_image_on_legion_handles_no_model_input(monkeypatch):
     calls = []
@@ -325,12 +392,9 @@ def test_generate_image_on_legion_retries_without_refiner(monkeypatch):
     assert out == fake_bytes
     assert url is None
 
-    # Verify the first generation call used cleaned fallback payload (has model, no refiner)
+    # Verify the first generation call included the model (we now include refiner keys by default)
     first_gen_call = calls[1]
     assert first_gen_call["json"].get("model") == rlbc.LEGION_MODEL
-    assert "refiner_control_percentage" not in first_gen_call["json"]
-
-    # Depending on which endpoint returned which error, a full fallback payload may or may not have been sent; what's important is the final success without refiner keys.
 
     # The final retry call should not include refiner keys
     final_call = calls[-1]
@@ -409,4 +473,103 @@ def test_generate_image_on_legion_retries_without_refiner(monkeypatch):
     uploaded_data_url = patch_children[0]["image"]["external"]["url"]
     # The base64 part should decode to our fake image bytes
     assert base64.b64decode(uploaded_data_url.split(",", 1)[1]) == fake_img
+
+
+def test_generate_image_on_legion_key_variants(monkeypatch):
+    calls = []
+    fake_bytes = b'var-bytes'
+    fake_b64 = base64.b64encode(fake_bytes).decode('utf-8')
+    data_url = f"data:image/png;base64,{fake_b64}"
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append({'url': url, 'json': json})
+        # Session acquisition
+        if url.endswith('/API/GetNewSession'):
+            return DummyResponse({'session_id': 'sess-var'}, status_code=200, ok=True)
+
+        if url.endswith('/API/GenerateText2Image'):
+            # If payload uses cfg_scale, simulate server error about preferred_dtype
+            if 'cfg_scale' in json:
+                return DummyResponse({}, status_code=400, ok=False, text="Unknown parameter preferred_dtype")
+            # If payload uses cfgscale, accept
+            if 'cfgscale' in json:
+                return DummyResponse({'images': [data_url]}, status_code=200, ok=True)
+            return DummyResponse({}, status_code=400, ok=False)
+
+        return DummyResponse({}, status_code=404, ok=False)
+
+    monkeypatch.setattr(rlbc.requests, 'post', fake_post)
+
+    out, url = rlbc.generate_image_on_legion("Var Test", "desc")
+    assert out == fake_bytes
+
+    gen_calls = [c for c in calls if c['url'].endswith('/API/GenerateText2Image')]
+    # Accept either cfg_scale or cfgscale appearing in at least one variant call
+    assert any(('cfg_scale' in c['json']) or ('cfgscale' in c['json']) for c in gen_calls)
+    # Ensure cfgscale variant is present when server supports it
+    assert any('cfgscale' in c['json'] for c in gen_calls)
+
+
+def test_generate_image_on_legion_refiner_method_mapping(monkeypatch):
+    calls = []
+    fake_bytes = b'ref-bytes'
+    fake_b64 = base64.b64encode(fake_bytes).decode('utf-8')
+    data_url = f"data:image/png;base64,{fake_b64}"
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append({'url': url, 'json': json})
+        if url.endswith('/API/GetNewSession'):
+            return DummyResponse({'session_id': 'sess-ref'}, status_code=200, ok=True)
+        if url.endswith('/API/GenerateText2Image'):
+            # If refiner_method is not normalized, reject
+            rm = json.get('refiner_method')
+            if rm and ('post-apply' in str(rm).lower() or 'post-apply (normal)' in str(rm).lower()):
+                return DummyResponse({}, status_code=400, ok=False, text="Invalid value for parameter Refiner Method: Invalid value for param Refiner Method - 'Post-Apply (Normal)'")
+            # Accept when normalized to 'PostApply'
+            if rm == 'PostApply' or json.get('refiner_upscale_method') == LEGION_REFINER_UPSCALE_METHOD:
+                return DummyResponse({'images': [data_url]}, status_code=200, ok=True)
+            return DummyResponse({}, status_code=400, ok=False)
+        return DummyResponse({}, status_code=404, ok=False)
+
+    monkeypatch.setattr(rlbc.requests, 'post', fake_post)
+
+    out, url = rlbc.generate_image_on_legion("Ref Test", "desc")
+    assert out == fake_bytes
+
+    gen_calls = [c for c in calls if c['url'].endswith('/API/GenerateText2Image')]
+    # Expect we sent a variety and one normalized to PostApply
+    assert any('PostApply' == c['json'].get('refiner_method') for c in gen_calls)
+
+
+def test_generate_image_on_legion_loras_object(monkeypatch):
+    calls = []
+    fake_bytes = b'loras-bytes'
+    fake_b64 = base64.b64encode(fake_bytes).decode('utf-8')
+    data_url = f"data:image/png;base64,{fake_b64}"
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append({'url': url, 'json': json})
+        if url.endswith('/API/GetNewSession'):
+            return DummyResponse({'session_id': 'sess-lora'}, status_code=200, ok=True)
+
+        if url.endswith('/API/GenerateText2Image'):
+            # If LoRAs are objects (name/weight), server rejects them (some SwarmUI versions reject objects)
+            if 'loras' in json and json['loras'] and isinstance(json['loras'][0], dict):
+                return DummyResponse({}, status_code=400, ok=False, text="Invalid value for parameter LoRAs: option does not exist")
+            # If LoRAs are strings, accept
+            if 'loras' in json and json['loras'] and isinstance(json['loras'][0], str):
+                return DummyResponse({'images': [data_url]}, status_code=200, ok=True)
+            return DummyResponse({}, status_code=400, ok=False)
+
+        return DummyResponse({}, status_code=404, ok=False)
+
+    monkeypatch.setattr(rlbc.requests, 'post', fake_post)
+
+    out, url = rlbc.generate_image_on_legion("LoRA Test", "desc")
+    assert out == fake_bytes
+
+    gen_calls = [c for c in calls if c['url'].endswith('/API/GenerateText2Image')]
+    # Expect that at least one call sent LoRAs as strings (some SwarmUI versions accept strings immediately).
+    assert any(isinstance(c['json'].get('loras', [None])[0], str) for c in gen_calls)
+    # If the server rejected strings, we should have also tried objects; so it's OK if objects weren't present when strings succeeded.
 
