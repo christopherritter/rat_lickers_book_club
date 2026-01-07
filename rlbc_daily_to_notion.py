@@ -349,13 +349,10 @@ text errors, misspelled words, distorted text, warped perspective, multiple book
         "refiner_steps": LEGION_REFINER_STEPS,
         # Other
         "automatic_vae": LEGION_AUTOMATIC_VAE,
-        # Critical change: LoRAs names-only and separate weights param
-        "LoRAs": loras_names_only,            # list of names (no weights)
-        "loras": loras_names_only,
-        "loras_weights": loras_weights_list,  # parallel list of weights
-        # Backward-compat string forms (in case server expects strings)
-        "loras_string": loras_names_string,
-        "loras_weights_string": loras_weights_string,
+        # LoRA keys: only send what SwarmUI expects
+        "LoRAs": loras_names_only,      # keep for compatibility
+        "loras": loras_names_only,      # the list SwarmUI already accepts
+        "weights": loras_weights_list,  # what SwarmUI is most likely expecting
         "sigma_shift": 1,
         "preferred_dtype": "default",
     }
@@ -366,15 +363,17 @@ text errors, misspelled words, distorted text, warped perspective, multiple book
     ]
 
     fallback_payload = dict(payload)
+
     fallback_payload.pop("cfgscale", None)
     fallback_payload["cfg_scale"] = LEGION_CFG_SCALE
     fallback_payload["sampler"] = "euler_a"
-    # Fallback: try lists (parallel) if string form fails
-    fallback_payload["loras"] = loras_names_only
-    fallback_payload["loras_weights"] = loras_weights_list
-    fallback_payload["loras_string"] = loras_names_string
-    fallback_payload["loras_weights_string"] = loras_weights_string
+    # Only keep LoRAs, loras, and weights keys
     fallback_payload["LoRAs"] = loras_names_only
+    fallback_payload["loras"] = loras_names_only
+    fallback_payload["weights"] = loras_weights_list
+    # Remove experimental/legacy keys if present
+    for k in ["loras_weights", "loras_string", "loras_weights_string"]:
+        fallback_payload.pop(k, None)
 
     print(" 📦 Flat parameters + 'images': 1 + top-level LoRAs in 'loras'")
 
