@@ -338,6 +338,129 @@ def test_generate_image_on_legion_retries_without_loras(monkeypatch):
     # The final call may or may not include LoRAs depending on which variant succeeded; ensure success occurred
     final = calls[-1]
 
+
+def test_generate_image_on_legion_lora_space_separated_fallback(monkeypatch):
+    """If pipe-delimited LoRAs are rejected, try space-separated string form."""
+    calls = []
+    fake_bytes = b"space-fallback-bytes"
+    fake_b64 = base64.b64encode(fake_bytes).decode("utf-8")
+    data_url = f"data:image/png;base64,{fake_b64}"
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append({"url": url, "json": json})
+        if url.endswith("/API/GetNewSession"):
+            return DummyResponse({"session_id": "sess-space"}, status_code=200, ok=True)
+        if url.endswith("/API/GenerateText2Image"):
+            l = json.get("loras")
+            # Reject pipe-delimited
+            if isinstance(l, str) and "|||" in l:
+                return DummyResponse({}, status_code=400, ok=False, text="Invalid value for parameter LoRAs: option does not exist")
+            # Accept space-separated
+            if isinstance(l, str) and " " in l:
+                return DummyResponse({"images": [data_url]}, status_code=200, ok=True)
+            return DummyResponse({}, status_code=400, ok=False, text="LoRAs rejected")
+        return DummyResponse({}, status_code=404, ok=False)
+
+    monkeypatch.setattr(rlbc.requests, "post", fake_post)
+
+    out, url = rlbc.generate_image_on_legion("Space LoRA", "desc")
+    assert out == fake_bytes
+
+    gen_calls = [c for c in calls if c["url"].endswith("/API/GenerateText2Image") or c["url"].endswith("/Text2Image")]
+    # Verify at least one attempt used space-separated LoRAs
+    assert any(isinstance(c["json"].get("loras"), str) and " " in c["json"].get("loras") for c in gen_calls)
+    # Also ensure alternative keys don't still contain the original pipe-delimited value
+    assert any((isinstance(c["json"].get("loras"), str) and "|||" not in c["json"].get("loras") and isinstance(c["json"].get("LoRAs"), str) and "|||" not in c["json"].get("LoRAs")) or (isinstance(c["json"].get("loras"), list) and isinstance(c["json"].get("LoRAs"), list)) for c in gen_calls)
+
+
+def test_generate_image_on_legion_lora_single_pipe_fallback(monkeypatch):
+    """If pipe-delimited LoRAs and space-separated are rejected, try single-pipe variant."""
+    calls = []
+    fake_bytes = b"singlepipe-fallback-bytes"
+    fake_b64 = base64.b64encode(fake_bytes).decode("utf-8")
+    data_url = f"data:image/png;base64,{fake_b64}"
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append({"url": url, "json": json})
+        if url.endswith("/API/GetNewSession"):
+            return DummyResponse({"session_id": "sess-pipe"}, status_code=200, ok=True)
+        if url.endswith("/API/GenerateText2Image"):
+            l = json.get("loras")
+            # Reject pipe-delimited and space-separated
+            if isinstance(l, str) and ("|||" in l or " " in l):
+                return DummyResponse({}, status_code=400, ok=False, text="Invalid value for parameter LoRAs: option does not exist")
+            # Accept single-pipe
+            if isinstance(l, str) and "|" in l:
+                return DummyResponse({"images": [data_url]}, status_code=200, ok=True)
+            return DummyResponse({}, status_code=400, ok=False, text="LoRAs rejected")
+        return DummyResponse({}, status_code=404, ok=False)
+
+    monkeypatch.setattr(rlbc.requests, "post", fake_post)
+
+    out, url = rlbc.generate_image_on_legion("Pipe LoRA", "desc")
+    assert out == fake_bytes
+
+    gen_calls = [c for c in calls if c["url"].endswith("/API/GenerateText2Image") or c["url"].endswith("/Text2Image")]
+    # Verify at least one attempt used single-pipe LoRAs
+    assert any(isinstance(c["json"].get("loras"), str) and "|" in c["json"].get("loras") and "|||" not in c["json"].get("loras") for c in gen_calls)
+
+
+def test_generate_image_on_legion_lora_concatenated_fallback(monkeypatch):
+    """If other LoRA formats are rejected, try concatenated (no separator) variant."""
+    calls = []
+    fake_bytes = b"concat-fallback-bytes"
+    fake_b64 = base64.b64encode(fake_bytes).decode("utf-8")
+    data_url = f"data:image/png;base64,{fake_b64}"
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append({"url": url, "json": json})
+        if url.endswith("/API/GetNewSession"):
+            return DummyResponse({"session_id": "sess-concat"}, status_code=200, ok=True)
+        if url.endswith("/API/GenerateText2Image"):
+            l = json.get("loras")
+            # Reject pipe-delimited, space, and single-pipe
+            if isinstance(l, str) and ("|||" in l or " " in l or "|" in l):
+                return DummyResponse({}, status_code=400, ok=False, text="Invalid value for parameter LoRAs: option does not exist")
+            # Accept concatenated
+            if isinstance(l, str) and ":" in l and " " not in l and "|" not in l and ";" not in l and "," not in l:
+                return DummyResponse({"images": [data_url]}, status_code=200, ok=True)
+            return DummyResponse({}, status_code=400, ok=False, text="LoRAs rejected")
+        return DummyResponse({}, status_code=404, ok=False)
+
+    monkeypatch.setattr(rlbc.requests, "post", fake_post)
+
+    out, url = rlbc.generate_image_on_legion("Concat LoRA", "desc")
+    assert out == fake_bytes
+
+    gen_calls = [c for c in calls if c["url"].endswith("/API/GenerateText2Image") or c["url"].endswith("/Text2Image")]
+    # Verify at least one attempt used concatenated LoRAs (no separators)
+    assert any(isinstance(c["json"].get("loras"), str) and ":" in c["json"].get("loras") and all(sep not in c["json"].get("loras") for sep in ["|||", " ", "|", ";", ","]) for c in gen_calls)
+
+
+def test_generate_image_on_legion_payload_debug(monkeypatch, capsys):
+    """When LEGION_PAYLOAD_DEBUG is enabled, the final payload is printed to stdout before sending."""
+    # Enable debug at module level
+    monkeypatch.setattr(rlbc, "LEGION_PAYLOAD_DEBUG", True)
+
+    def fake_post(url, json=None, timeout=None):
+        if url.endswith("/API/GetNewSession"):
+            return DummyResponse({"session_id": "sess-debug"}, status_code=200, ok=True)
+        if url.endswith("/API/GenerateText2Image"):
+            fake_bytes = b"debug-bytes"
+            fake_b64 = base64.b64encode(fake_bytes).decode("utf-8")
+            data_url = f"data:image/png;base64,{fake_b64}"
+            return DummyResponse({"images": [data_url]}, status_code=200, ok=True)
+        return DummyResponse({}, status_code=404, ok=False)
+
+    monkeypatch.setattr(rlbc.requests, "post", fake_post)
+
+    out, url = rlbc.generate_image_on_legion("Debug Title", "desc")
+    assert out == b"debug-bytes"
+
+    captured = capsys.readouterr()
+    assert "🔍 LEGION payload to" in captured.out
+    assert '"loras"' in captured.out
+
 def test_generate_image_on_legion_handles_no_model_input(monkeypatch):
     calls = []
     fake_bytes = b"bytes-from-no-model-retry"
