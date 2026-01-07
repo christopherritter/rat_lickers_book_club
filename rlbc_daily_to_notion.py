@@ -287,15 +287,22 @@ photorealistic, 8k quality, professional photography, highly detailed"""
 messy, cluttered, dirty, damaged books, poor lighting, overexposed, underexposed,
 text errors, misspelled words, distorted text, warped perspective, multiple books in focus"""
 
-    # Step 3: LoRAs – start from last known-good format (list of strings), now with optional weights
+    # Step 3: LoRAs – names and weights from env
     loras_names_only = [name for name in LEGION_LORAS]
-    loras_weighted = build_weighted_loras()
-    loras_comma = ",".join(loras_weighted)
-    prompt = base_prompt
+    loras_weights_list = [LEGION_LORA_WEIGHTS.get(name, 1.0) for name in loras_names_only]
+
+    # Build inline lora tags for the prompt
+    inline_lora_tags = ""
+    for name, w in zip(loras_names_only, loras_weights_list):
+        short_name = name.replace(".safetensors", "").replace(".pt", "")
+        inline_lora_tags += f"<lora:{short_name}:{w}>"
+
+    # Prepend inline tags to the base prompt
+    prompt = inline_lora_tags + " " + base_prompt
 
     print(f" 📋 LoRAs (names only): {loras_names_only}")
     print(f" 📋 LoRA weights: {LEGION_LORA_WEIGHTS}")
-    print(f" 📋 LoRAs (weighted strings): {loras_weighted}")
+    print(f" 📋 Inline LoRA tags: {inline_lora_tags}")
 
     # Step 4: Normalize refiner method
     def normalize_refiner_method(m: str) -> str:
@@ -310,24 +317,8 @@ text errors, misspelled words, distorted text, warped perspective, multiple book
             return "StepSwapNoisy"
         return m
 
-    # Step 5: Build flat payload
-    # Primary: LoRAs as a sanitized comma-separated weighted string (name:weight,name2:weight)
-    loras_weight_string = loras_comma.replace("\n", "").replace("|||", ",")
-    loras_weight_string = ",".join([p.strip() for p in loras_weight_string.split(",") if p.strip()])
 
-    # Build parallel weights list to match the order of LEGION_LORAS
-    loras_weights_list: List[float] = []
-    for name in loras_names_only:
-        w = LEGION_LORA_WEIGHTS.get(name, 1.0)
-        # keep integers when appropriate
-        if isinstance(w, float) and w.is_integer():
-            loras_weights_list.append(int(w))
-        else:
-            loras_weights_list.append(w)
-
-    # Also prepare names-only comma string for servers that expect a string
-    loras_names_string = ",".join(loras_names_only)
-    loras_weights_string = ",".join([str(w) for w in loras_weights_list])
+    # (Legacy/experimental LoRA string logic removed; only inline tags and loras_names_only/loras_weights_list are used)
 
     payload: Dict[str, Any] = {
         "session_id": session_id,
@@ -349,10 +340,9 @@ text errors, misspelled words, distorted text, warped perspective, multiple book
         "refiner_steps": LEGION_REFINER_STEPS,
         # Other
         "automatic_vae": LEGION_AUTOMATIC_VAE,
-        # LoRA keys: only send what SwarmUI expects
-        "LoRAs": loras_names_only,      # keep for compatibility
-        "loras": loras_names_only,      # the list SwarmUI already accepts
-        "weights": loras_weights_list,  # what SwarmUI is most likely expecting
+        # SwarmUI internal parameter names (case-sensitive):
+        "Loras": loras_names_only,         # Capital L
+        "LoraWeights": loras_weights_list, # Capital L, Capital W
         "sigma_shift": 1,
         "preferred_dtype": "default",
     }
@@ -363,17 +353,9 @@ text errors, misspelled words, distorted text, warped perspective, multiple book
     ]
 
     fallback_payload = dict(payload)
-
     fallback_payload.pop("cfgscale", None)
     fallback_payload["cfg_scale"] = LEGION_CFG_SCALE
     fallback_payload["sampler"] = "euler_a"
-    # Only keep LoRAs, loras, and weights keys
-    fallback_payload["LoRAs"] = loras_names_only
-    fallback_payload["loras"] = loras_names_only
-    fallback_payload["weights"] = loras_weights_list
-    # Remove experimental/legacy keys if present
-    for k in ["loras_weights", "loras_string", "loras_weights_string"]:
-        fallback_payload.pop(k, None)
 
     print(" 📦 Flat parameters + 'images': 1 + top-level LoRAs in 'loras'")
 
